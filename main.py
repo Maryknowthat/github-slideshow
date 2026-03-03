@@ -7,13 +7,12 @@ import argparse
 import base64
 import io
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Iterable, Tuple
 
 from openai import OpenAI
-from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 TARGET_SIZE = (1290, 2796)  # iPhone 15 Pro Max portrait resolution
 
@@ -50,7 +49,7 @@ def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFo
 def analyze_image_style(image: Image.Image) -> StyleProfile:
     rgb = image.convert("RGB")
     hsv = rgb.convert("HSV")
-    h, s, v = hsv.split()
+    _, s, _ = hsv.split()
     sat_mean = ImageStat.Stat(s).mean[0] / 255.0
 
     gray = rgb.convert("L")
@@ -233,13 +232,11 @@ def save_image(image: Image.Image, path: Path) -> None:
     image.save(path, format="PNG")
 
 
-def process(args: argparse.Namespace) -> None:
-    input_path = Path(args.input)
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
+def process_one(input_path: Path, outdir: Path, date_text: str, time_text: str) -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input image not found: {input_path}")
+
+    outdir.mkdir(parents=True, exist_ok=True)
 
     source_image = Image.open(input_path).convert("RGB")
     profile = analyze_image_style(source_image)
@@ -273,7 +270,7 @@ def process(args: argparse.Namespace) -> None:
 
     if lock_img is not None:
         try:
-            lock_preview = create_lockscreen_preview(lock_img, args.date, args.time)
+            lock_preview = create_lockscreen_preview(lock_img, date_text, time_text)
             save_image(lock_preview, lock_preview_path)
             logging.info("Saved %s", lock_preview_path)
         except Exception as exc:
@@ -290,11 +287,60 @@ def process(args: argparse.Namespace) -> None:
     logging.info("Done.")
 
 
+def collect_images(root_dir: Path) -> Iterable[Path]:
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    for path in sorted(root_dir.rglob("*")):
+        if path.is_file() and path.suffix.lower() in exts:
+            yield path
+
+
+def make_unique_subdir(base_outdir: Path, stem: str) -> Path:
+    candidate = base_outdir / stem
+    if not candidate.exists():
+        return candidate
+
+    index = 2
+    while True:
+        candidate = base_outdir / f"{stem}-{index}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def process(args: argparse.Namespace) -> None:
+    base_outdir = Path(args.outdir)
+    base_outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.input:
+        process_one(Path(args.input), base_outdir, args.date, args.time)
+        return
+
+    input_dir = Path(args.input_dir)
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise NotADirectoryError(f"Input directory not found: {input_dir}")
+
+    images = list(collect_images(input_dir))
+    if not images:
+        logging.warning("No supported images found under %s", input_dir)
+        return
+
+    logging.info("Found %d images under %s", len(images), input_dir)
+    for image_path in images:
+        target_dir = make_unique_subdir(base_outdir, image_path.stem)
+        logging.info("Processing %s -> %s", image_path, target_dir)
+        try:
+            process_one(image_path, target_dir, args.date, args.time)
+        except Exception as exc:
+            logging.exception("Failed processing %s: %s", image_path, exc)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Repaint an input image into iPhone lock/home wallpapers and output UI previews.",
     )
-    parser.add_argument("--input", required=True, help="Path to source image")
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--input", help="Path to one source image")
+    source_group.add_argument("--input-dir", help="Path to source image directory (recursive)")
     parser.add_argument("--outdir", default="out", help="Output directory")
     parser.add_argument("--time", default="22:48", help="Time text for lockscreen preview")
     parser.add_argument("--date", default="3月1日 周日 · 农历正月十三", help="Date text for lockscreen preview")
