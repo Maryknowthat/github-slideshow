@@ -232,7 +232,7 @@ def save_image(image: Image.Image, path: Path) -> None:
     image.save(path, format="PNG")
 
 
-def process_one(input_path: Path, outdir: Path, date_text: str, time_text: str) -> None:
+def process_one(input_path: Path, outdir: Path, date_text: str, time_text: str) -> bool:
     if not input_path.exists():
         raise FileNotFoundError(f"Input image not found: {input_path}")
 
@@ -284,11 +284,16 @@ def process_one(input_path: Path, outdir: Path, date_text: str, time_text: str) 
         except Exception as exc:
             logging.exception("Failed homescreen preview composition: %s", exc)
 
-    logging.info("Done.")
+    success = lock_img is not None or home_img is not None
+    if success:
+        logging.info("Done.")
+    else:
+        logging.error("No wallpapers were generated for %s", input_path)
+    return success
 
 
 def collect_images(root_dir: Path) -> Iterable[Path]:
-    exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
     for path in sorted(root_dir.rglob("*")):
         if path.is_file() and path.suffix.lower() in exts:
             yield path
@@ -312,7 +317,10 @@ def process(args: argparse.Namespace) -> None:
     base_outdir.mkdir(parents=True, exist_ok=True)
 
     if args.input:
-        process_one(Path(args.input), base_outdir, args.date, args.time)
+        ok = process_one(Path(args.input), base_outdir, args.date, args.time)
+        if not ok:
+            logging.error("Summary: 1 failed file")
+            logging.error("- %s", args.input)
         return
 
     input_dir = Path(args.input_dir)
@@ -324,14 +332,26 @@ def process(args: argparse.Namespace) -> None:
         logging.warning("No supported images found under %s", input_dir)
         return
 
+    failed_files: list[Path] = []
+
     logging.info("Found %d images under %s", len(images), input_dir)
     for image_path in images:
         target_dir = make_unique_subdir(base_outdir, image_path.stem)
         logging.info("Processing %s -> %s", image_path, target_dir)
         try:
-            process_one(image_path, target_dir, args.date, args.time)
+            ok = process_one(image_path, target_dir, args.date, args.time)
+            if not ok:
+                failed_files.append(image_path)
         except Exception as exc:
             logging.exception("Failed processing %s: %s", image_path, exc)
+            failed_files.append(image_path)
+
+    if failed_files:
+        logging.error("Summary: %d failed file(s)", len(failed_files))
+        for failed in failed_files:
+            logging.error("- %s", failed)
+    else:
+        logging.info("Summary: all files processed successfully")
 
 
 def parse_args() -> argparse.Namespace:
